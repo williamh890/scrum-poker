@@ -1,0 +1,943 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planning Poker (P2P)</title>
+<link rel="icon" href="data:,">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+
+  :root {
+    --ink: #1a1f2e;
+    --panel: #232a3d;
+    --panel-soft: #2d3548;
+    --stock: #f7f5f0;
+    --accent: #e8763c;
+    --accent-soft: #f0966a;
+    --teal: #3a9188;
+    --muted: #8b91a3;
+    --muted-dim: #5b6178;
+    --border: #3a4258;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--ink);
+    color: var(--stock);
+    min-height: 100vh;
+  }
+
+  .bg-texture {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.035;
+    background-image: radial-gradient(circle at 1px 1px, var(--stock) 1px, transparent 0);
+    background-size: 28px 28px;
+    z-index: 0;
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 36px 24px 80px;
+  }
+
+  .hidden { display: none !important; }
+
+  /* ===== Landing ===== */
+  .landing {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 80vh;
+    text-align: center;
+    gap: 8px;
+  }
+
+  .landing .mark {
+    font-family: 'Fraunces', serif;
+    font-size: 15px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 18px;
+  }
+
+  .landing h1 {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(34px, 7vw, 54px);
+    font-weight: 600;
+    line-height: 1.05;
+    margin: 0 0 14px;
+    letter-spacing: -0.01em;
+  }
+
+  .landing p.sub {
+    color: var(--muted);
+    font-size: 16px;
+    max-width: 460px;
+    line-height: 1.6;
+    margin: 0 0 8px;
+  }
+
+  .landing p.sub2 {
+    color: var(--muted-dim);
+    font-size: 13px;
+    max-width: 440px;
+    line-height: 1.5;
+    margin: 0 0 32px;
+  }
+
+  .landing-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: 100%;
+    max-width: 360px;
+  }
+
+  .field-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-dim);
+    text-align: left;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  input[type="text"] {
+    width: 100%;
+    padding: 14px 16px;
+    border-radius: 10px;
+    border: 1.5px solid var(--border);
+    background: var(--panel);
+    color: var(--stock);
+    font-family: 'Inter', sans-serif;
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+  input[type="text"].mono { font-family: 'JetBrains Mono', monospace; letter-spacing: 0.05em; text-transform: uppercase; }
+  input::placeholder { color: var(--muted-dim); }
+
+  .btn {
+    appearance: none;
+    border: none;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    font-size: 15px;
+    padding: 14px 22px;
+    border-radius: 10px;
+    transition: transform 0.12s ease, background 0.15s ease, box-shadow 0.15s ease;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn-primary { background: var(--accent); color: #1a1009; }
+  .btn-primary:hover { background: var(--accent-soft); }
+  .btn-primary:disabled { background: var(--muted-dim); color: var(--ink); cursor: not-allowed; opacity: 0.6; }
+  .btn-ghost { background: transparent; color: var(--muted); border: 1.5px solid var(--border); }
+  .btn-ghost:hover { color: var(--stock); border-color: var(--muted); }
+
+  .divider-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    color: var(--muted-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 6px 0;
+  }
+  .divider-row::before, .divider-row::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .err-text {
+    color: var(--accent-soft);
+    font-size: 13px;
+    text-align: left;
+    margin-top: -4px;
+    min-height: 16px;
+  }
+
+  .status-text {
+    color: var(--muted);
+    font-size: 13px;
+    text-align: left;
+    margin-top: -4px;
+    min-height: 16px;
+  }
+
+  /* ===== Room header ===== */
+  .room-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 36px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .room-eyebrow {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted-dim);
+    font-weight: 600;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .conn-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted-dim);
+    transition: background 0.2s ease;
+  }
+  .conn-dot.live { background: var(--teal); }
+  .conn-dot.down { background: var(--accent); }
+
+  .room-title {
+    font-family: 'Fraunces', serif;
+    font-size: 28px;
+    font-weight: 600;
+  }
+
+  .room-code-chip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--panel);
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+  }
+  .room-code-chip .code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 0.03em;
+    color: var(--accent-soft);
+    font-weight: 600;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .room-code-chip button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  .room-code-chip button:hover { color: var(--stock); background: var(--panel-soft); }
+
+  .you-label {
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .you-label b { color: var(--stock); font-weight: 600; }
+  .you-label .leave-link { cursor: pointer; text-decoration: underline; }
+
+  .host-warning {
+    background: var(--panel);
+    border: 1.5px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 28px;
+  }
+  .host-warning b { color: var(--accent-soft); }
+
+  /* ===== Card hand ===== */
+  .deck-section { margin-bottom: 48px; }
+
+  .deck-heading {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-dim);
+    font-weight: 600;
+    margin-bottom: 18px;
+  }
+
+  .hand {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 10px;
+    justify-content: flex-start;
+  }
+
+  .card {
+    --tilt: 0deg;
+    width: 76px;
+    height: 106px;
+    border-radius: 10px;
+    background: var(--stock);
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Fraunces', serif;
+    font-size: 26px;
+    font-weight: 600;
+    cursor: pointer;
+    position: relative;
+    transform: rotate(var(--tilt)) translateY(0);
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.18s ease;
+    box-shadow: 0 2px 0 rgba(0,0,0,0.15), 0 4px 10px rgba(0,0,0,0.25);
+    border: 2px solid transparent;
+    user-select: none;
+  }
+  .card:nth-child(odd) { --tilt: -1.4deg; }
+  .card:nth-child(even) { --tilt: 1.2deg; }
+  .card:hover { transform: rotate(var(--tilt)) translateY(-8px); box-shadow: 0 10px 20px rgba(0,0,0,0.35); }
+  .card.selected {
+    transform: rotate(0deg) translateY(-14px);
+    border-color: var(--accent);
+    box-shadow: 0 14px 24px rgba(232,118,60,0.35);
+  }
+  .card.selected::after {
+    content: '';
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .card .corner-mark {
+    position: absolute;
+    top: 6px;
+    left: 8px;
+    font-size: 10px;
+    font-family: 'Inter', sans-serif;
+    color: var(--muted-dim);
+    opacity: 0.5;
+  }
+
+  .hand-status {
+    margin-top: 18px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .hand-status b { color: var(--accent-soft); }
+
+  /* ===== Controls ===== */
+  .controls-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 36px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .vote-progress {
+    font-size: 13px;
+    color: var(--muted);
+    margin-left: auto;
+  }
+  .vote-progress b { color: var(--stock); }
+
+  /* ===== Roster ===== */
+  .roster {
+    border: 1.5px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--panel);
+  }
+
+  .roster-head {
+    display: flex;
+    padding: 16px 20px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-dim);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+  }
+  .roster-head .col-name { flex: 1; }
+  .roster-head .col-vote { width: 110px; text-align: center; }
+
+  .roster-row {
+    display: flex;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s ease;
+  }
+  .roster-row:last-child { border-bottom: none; }
+  .roster-row:hover { background: var(--panel-soft); }
+
+  .col-name {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+  }
+  .col-name .you-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+  .col-name .host-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted-dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+
+  .col-vote {
+    width: 110px;
+    display: flex;
+    justify-content: center;
+  }
+
+  .vote-pip {
+    width: 38px;
+    height: 50px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Fraunces', serif;
+    font-weight: 600;
+    font-size: 16px;
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.2s, color 0.2s;
+  }
+  .vote-pip.waiting {
+    background: var(--panel-soft);
+    color: var(--muted-dim);
+    font-family: 'Inter', sans-serif;
+    font-size: 18px;
+  }
+  .vote-pip.voted-hidden {
+    background: var(--accent);
+    color: var(--accent);
+    transform: scale(0.9);
+  }
+  .vote-pip.revealed {
+    background: var(--stock);
+    color: var(--ink);
+    animation: flip-in 0.5s ease;
+  }
+  @keyframes flip-in {
+    0% { transform: scaleX(0.1); opacity: 0.3; }
+    60% { transform: scaleX(1.08); }
+    100% { transform: scaleX(1); opacity: 1; }
+  }
+
+  /* ===== Summary ===== */
+  .summary {
+    display: flex;
+    gap: 28px;
+    padding: 20px 20px 4px;
+    flex-wrap: wrap;
+  }
+  .summary-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .summary-stat .stat-val {
+    font-family: 'Fraunces', serif;
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--teal);
+  }
+  .summary-stat .stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-dim);
+  }
+
+  .footer-note {
+    text-align: center;
+    color: var(--muted-dim);
+    font-size: 12px;
+    margin-top: 28px;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 480px) {
+    .card { width: 62px; height: 88px; font-size: 20px; }
+    .room-header { flex-direction: column; }
+    .vote-progress { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+  <div class="bg-texture"></div>
+  <div class="wrap">
+
+    <!-- Landing -->
+    <div id="landing" class="landing">
+      <div class="mark">Planning Poker</div>
+      <h1>Estimate together,<br>peer to peer.</h1>
+      <p class="sub">Create a room, share the link, and reveal estimates together once everyone's picked a card. Runs entirely in your browsers &mdash; no server stores your data.</p>
+      <p class="sub2">One person needs to keep their tab open as the host. If they close it, the room ends for everyone.</p>
+      <div class="landing-actions">
+        <div>
+          <div class="field-label">Your name</div>
+          <input type="text" id="name-input" placeholder="e.g. William" maxlength="24">
+        </div>
+        <button class="btn btn-primary" id="create-btn">Create a new room</button>
+        <div class="divider-row">or join existing</div>
+        <div>
+          <div class="field-label">Room link or code</div>
+          <input type="text" class="mono" id="join-code-input" placeholder="paste room code here" maxlength="80">
+        </div>
+        <button class="btn btn-ghost" id="join-btn">Join room</button>
+        <div class="err-text" id="error-text"></div>
+        <div class="status-text" id="status-text"></div>
+      </div>
+    </div>
+
+    <!-- Room -->
+    <div id="room-view" class="hidden">
+      <div class="room-header">
+        <div>
+          <div class="room-eyebrow"><span class="conn-dot" id="conn-dot"></span><span id="conn-label">Connecting</span></div>
+          <div class="room-title">Sprint Estimation</div>
+          <div class="you-label" style="margin-top:6px;">Voting as <b id="you-name"></b> &middot; <span class="leave-link" id="leave-link">leave room</span></div>
+        </div>
+        <div class="room-code-chip">
+          <span class="code" id="room-code-display"></span>
+          <button id="copy-btn">Copy link</button>
+        </div>
+      </div>
+
+      <div id="host-warning" class="host-warning hidden">
+        You're hosting this room. Keep this tab open &mdash; if you close it, the room ends for everyone else too.
+      </div>
+
+      <div class="deck-section">
+        <div class="deck-heading">Choose your estimate</div>
+        <div class="hand" id="hand"></div>
+        <div class="hand-status" id="hand-status">Pick a card above to lock in your estimate.</div>
+      </div>
+
+      <div class="controls-row">
+        <button class="btn btn-primary" id="reveal-btn">Reveal cards</button>
+        <button class="btn btn-ghost" id="reset-btn">New round</button>
+        <div class="vote-progress"><b id="voted-count">0</b> of <span id="player-count">0</span> voted</div>
+      </div>
+
+      <div class="roster">
+        <div class="roster-head">
+          <div class="col-name">Name</div>
+          <div class="col-vote">Estimate</div>
+        </div>
+        <div id="roster-body"></div>
+        <div class="summary hidden" id="summary"></div>
+      </div>
+
+      <div class="footer-note">Share the link or code with teammates to have them join this round.<br>This connection is peer-to-peer &mdash; estimates never touch a server.</div>
+    </div>
+  </div>
+
+<script>
+const DECK = [
+  { v: '0', label: '0' },
+  { v: '0.5', label: '0.5' },
+  { v: '1', label: '1' },
+  { v: '2', label: '2' },
+  { v: '3', label: '3' },
+  { v: '5', label: '5' },
+  { v: '8', label: '8' },
+  { v: '13', label: '13' },
+  { v: '20', label: '20' },
+  { v: '40', label: '40' },
+  { v: '100', label: '100' },
+  { v: '?', label: '?' },
+  { v: 'coffee', label: '\u2615' },
+];
+const deckLabel = (v) => (DECK.find(d => d.v === v) || { label: v }).label;
+
+const el = (id) => document.getElementById(id);
+
+// ---- App state ----
+let myName = '';
+let isHost = false;
+let roomCode = '';      // the host's PeerJS id, shared as the "room code"
+let peer = null;        // this browser's Peer object
+let hostConn = null;    // (joiner only) DataConnection to the host
+const peerConns = new Map(); // (host only) name -> DataConnection
+
+// canonical room state, lives on the host, mirrored on joiners
+let currentRoom = { revealed: false, players: {} };
+
+function showError(msg) { el('error-text').textContent = msg; el('status-text').textContent = ''; }
+function showStatus(msg) { el('status-text').textContent = msg; el('error-text').textContent = ''; }
+
+function buildHand() {
+  const hand = el('hand');
+  hand.innerHTML = '';
+  DECK.forEach((c) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.value = c.v;
+    card.innerHTML = `<span class="corner-mark">SP</span><span>${c.label}</span>`;
+    card.addEventListener('click', () => castVote(c.v));
+    hand.appendChild(card);
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function setConnState(state) {
+  const dot = el('conn-dot');
+  const label = el('conn-label');
+  dot.classList.remove('live', 'down');
+  if (state === 'live') { dot.classList.add('live'); label.textContent = isHost ? 'Hosting' : 'Live'; }
+  else if (state === 'down') { dot.classList.add('down'); label.textContent = 'Disconnected'; }
+  else { label.textContent = 'Connecting'; }
+}
+
+function render() {
+  const players = currentRoom.players || {};
+  const names = Object.keys(players);
+  const revealed = !!currentRoom.revealed;
+  const myVote = players[myName] ? players[myName].vote : null;
+
+  document.querySelectorAll('#hand .card').forEach((card) => {
+    card.classList.toggle('selected', card.dataset.value === myVote);
+  });
+  el('hand-status').innerHTML = myVote === null
+    ? 'Pick a card above to lock in your estimate.'
+    : `You picked <b>${deckLabel(myVote)}</b>. Click it again to change your mind.`;
+
+  const votedCount = names.filter(n => players[n].vote !== null).length;
+  el('voted-count').textContent = votedCount;
+  el('player-count').textContent = names.length;
+  el('reveal-btn').disabled = revealed;
+
+  const rosterBody = el('roster-body');
+  rosterBody.innerHTML = '';
+  names.forEach((n) => {
+    const v = players[n].vote;
+    let pipClass = 'waiting', pipContent = '\u2014';
+    if (v !== null) {
+      if (revealed) { pipClass = 'revealed'; pipContent = deckLabel(v); }
+      else { pipClass = 'voted-hidden'; pipContent = ''; }
+    }
+    const row = document.createElement('div');
+    row.className = 'roster-row';
+    const hostTag = players[n].isHost ? '<span class="host-tag">host</span>' : '';
+    row.innerHTML = `
+      <div class="col-name">${n === myName ? '<span class="you-dot"></span>' : ''}${escapeHtml(n)} ${hostTag}</div>
+      <div class="col-vote"><div class="vote-pip ${pipClass}">${pipContent}</div></div>
+    `;
+    rosterBody.appendChild(row);
+  });
+
+  const summary = el('summary');
+  if (revealed) {
+    const numeric = names.map(n => players[n].vote).filter(v => v !== null && v !== '?' && v !== 'coffee').map(Number);
+    const avg = numeric.length ? (numeric.reduce((a, b) => a + b, 0) / numeric.length) : null;
+    const firstVote = names.length ? players[names[0]].vote : null;
+    const agreement = names.length ? Math.round((names.filter(n => players[n].vote === firstVote).length / names.length) * 100) : null;
+    let html = '';
+    if (avg !== null) html += `<div class="summary-stat"><div class="stat-val">${avg.toFixed(1)}</div><div class="stat-label">Average</div></div>`;
+    if (agreement !== null) html += `<div class="summary-stat"><div class="stat-val">${agreement}%</div><div class="stat-label">Full agreement</div></div>`;
+    summary.innerHTML = html;
+    summary.classList.toggle('hidden', html === '');
+  } else {
+    summary.classList.add('hidden');
+  }
+}
+
+// ---- Host-side room logic (authoritative state) ----
+function hostBroadcast() {
+  const payload = JSON.stringify({ type: 'state', room: currentRoom });
+  for (const conn of peerConns.values()) {
+    if (conn.open) conn.send(payload);
+  }
+  render();
+}
+
+function hostApplyVote(name, value) {
+  if (!currentRoom.players[name]) return;
+  const current = currentRoom.players[name].vote;
+  currentRoom.players[name].vote = current === value ? null : value;
+  hostBroadcast();
+}
+
+function hostApplyReveal() {
+  currentRoom.revealed = true;
+  hostBroadcast();
+}
+
+function hostApplyReset() {
+  currentRoom.revealed = false;
+  for (const p of Object.values(currentRoom.players)) p.vote = null;
+  hostBroadcast();
+}
+
+function hostHandleIncoming(name, msg) {
+  switch (msg.type) {
+    case 'vote': hostApplyVote(name, msg.value); break;
+    case 'reveal': hostApplyReveal(); break;
+    case 'reset': hostApplyReset(); break;
+  }
+}
+
+// ---- Sending actions (works the same whether you're host or joiner) ----
+function castVote(value) {
+  if (isHost) {
+    hostApplyVote(myName, value);
+  } else if (hostConn && hostConn.open) {
+    hostConn.send(JSON.stringify({ type: 'vote', value }));
+  }
+}
+
+function requestReveal() {
+  if (isHost) hostApplyReveal();
+  else if (hostConn && hostConn.open) hostConn.send(JSON.stringify({ type: 'reveal' }));
+}
+
+function requestReset() {
+  if (isHost) hostApplyReset();
+  else if (hostConn && hostConn.open) hostConn.send(JSON.stringify({ type: 'reset' }));
+}
+
+// ---- Entering the room UI ----
+function enterRoomUI() {
+  el('landing').classList.add('hidden');
+  el('room-view').classList.remove('hidden');
+  el('you-name').textContent = myName;
+  el('room-code-display').textContent = roomCode;
+  el('host-warning').classList.toggle('hidden', !isHost);
+  buildHand();
+  render();
+}
+
+function leaveRoom() {
+  if (peer) { peer.destroy(); peer = null; }
+  hostConn = null;
+  peerConns.clear();
+  currentRoom = { revealed: false, players: {} };
+  isHost = false;
+  el('room-view').classList.add('hidden');
+  el('landing').classList.remove('hidden');
+  showError(''); showStatus('');
+  const url = new URL(location.href);
+  url.searchParams.delete('room');
+  history.replaceState(null, '', url);
+}
+
+// ---- Host flow ----
+function createRoom() {
+  const name = el('name-input').value.trim();
+  if (!name) { showError('Enter your name to create a room.'); return; }
+  showError('');
+  myName = name;
+  isHost = true;
+
+  showStatus('Setting up your room…');
+  peer = new Peer(undefined, {
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+      ],
+    },
+  });
+
+  peer.on('open', (id) => {
+    roomCode = id;
+    currentRoom = { revealed: false, players: { [myName]: { vote: null, isHost: true } } };
+    setConnState('live');
+    enterRoomUI();
+    const url = new URL(location.href);
+    url.searchParams.set('room', roomCode);
+    history.replaceState(null, '', url);
+  });
+
+  peer.on('connection', (conn) => {
+    let joinedName = null;
+    conn.on('open', () => {
+      // We don't know the joiner's name until their first message, but
+      // PeerJS connections carry metadata passed at connect-time instead.
+      const requestedName = (conn.metadata && conn.metadata.name) ? conn.metadata.name : 'Guest';
+      const existingConn = peerConns.get(requestedName);
+
+      if (currentRoom.players[requestedName]) {
+        // A player with this name already exists in the room. We treat
+        // this new connection as that same player reconnecting (e.g.
+        // after a refresh or dropped wifi) rather than minting a new
+        // name — "newest connection for a name wins" is simpler and more
+        // robust than trying to detect whether the old connection is
+        // really dead, since WebRTC's own close detection can lag well
+        // behind reality. Any previous connection object for this name
+        // is force-closed so it can't also claim to represent the player.
+        if (existingConn && existingConn !== conn) {
+          try { existingConn.close(); } catch (e) { /* already gone */ }
+        }
+        joinedName = requestedName;
+      } else {
+        // Genuinely new name.
+        joinedName = requestedName;
+        currentRoom.players[joinedName] = { vote: null, isHost: false };
+      }
+
+      peerConns.set(joinedName, conn);
+      hostBroadcast();
+    });
+    conn.on('data', (raw) => {
+      if (!joinedName) return;
+      let msg;
+      try { msg = JSON.parse(raw); } catch (e) { return; }
+      hostHandleIncoming(joinedName, msg);
+    });
+    conn.on('close', () => {
+      // Only clear the connection entry if it's still this one (a newer
+      // reconnect may have already replaced it in peerConns).
+      if (joinedName && peerConns.get(joinedName) === conn) peerConns.delete(joinedName);
+      // Player stays in the roster (consistent with "refresh shouldn't lose your seat"),
+      // they just stop being reachable until they reconnect.
+    });
+  });
+
+  peer.on('error', (err) => {
+    console.error('Peer error', err);
+    setConnState('down');
+    showStatus('Connection issue: ' + (err && err.type ? err.type : 'unknown error'));
+  });
+
+  peer.on('disconnected', () => setConnState('down'));
+}
+
+// ---- Joiner flow ----
+function extractRoomCode(input) {
+  const trimmed = input.trim();
+  try {
+    const url = new URL(trimmed);
+    const fromQuery = url.searchParams.get('room');
+    if (fromQuery) return fromQuery;
+  } catch (e) {
+    // not a URL, treat as a raw code
+  }
+  return trimmed;
+}
+
+function joinRoom() {
+  const name = el('name-input').value.trim();
+  const rawCode = el('join-code-input').value;
+  const code = extractRoomCode(rawCode);
+  if (!name) { showError('Enter your name to join.'); return; }
+  if (!code) { showError('Enter a room link or code.'); return; }
+  showError('');
+  myName = name;
+  isHost = false;
+  roomCode = code;
+
+  showStatus('Connecting to room…');
+  peer = new Peer(undefined, {
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+      ],
+    },
+  });
+
+  peer.on('open', () => {
+    hostConn = peer.connect(roomCode, { metadata: { name: myName }, reliable: true });
+
+    hostConn.on('open', () => {
+      setConnState('live');
+      enterRoomUI();
+      const url = new URL(location.href);
+      url.searchParams.set('room', roomCode);
+      history.replaceState(null, '', url);
+    });
+
+    hostConn.on('data', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw); } catch (e) { return; }
+      if (msg.type === 'state') {
+        currentRoom = msg.room;
+        render();
+      }
+    });
+
+    hostConn.on('close', () => {
+      setConnState('down');
+      showStatus('Lost connection to the host. They may have closed the room.');
+    });
+
+    hostConn.on('error', (err) => {
+      console.error('Connection error', err);
+      setConnState('down');
+      showError('Could not reach that room. Check the code and try again.');
+    });
+  });
+
+  peer.on('error', (err) => {
+    console.error('Peer error', err);
+    if (err && err.type === 'peer-unavailable') {
+      showError('No room found with that code. Check it and try again.');
+    } else {
+      showError('Connection issue: ' + (err && err.type ? err.type : 'unknown error'));
+    }
+  });
+}
+
+// ---- Wiring ----
+el('create-btn').addEventListener('click', createRoom);
+el('join-btn').addEventListener('click', joinRoom);
+el('leave-link').addEventListener('click', leaveRoom);
+el('reveal-btn').addEventListener('click', requestReveal);
+el('reset-btn').addEventListener('click', requestReset);
+el('copy-btn').addEventListener('click', () => {
+  const url = new URL(location.href);
+  url.searchParams.set('room', roomCode);
+  navigator.clipboard.writeText(url.toString()).then(() => {
+    const btn = el('copy-btn');
+    const old = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }).catch(() => {});
+});
+
+// Auto-fill join code if a room link was opened directly.
+const existingCode = new URL(location.href).searchParams.get('room');
+if (existingCode) {
+  el('join-code-input').value = existingCode;
+}
+</script>
+</body>
+</html>
