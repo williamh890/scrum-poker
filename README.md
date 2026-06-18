@@ -60,7 +60,29 @@ the second one to connect will take over the first one's spot rather than
 appearing as a separate row. For a small team this is unlikely to matter,
 but it's worth knowing about if your team has, say, two Tylers.
 
-## Testing
+## Deploying via GitHub Pages + GitHub Actions
+
+This repo includes `.github/workflows/deploy-pages.yml`, which deploys
+`index.html` to GitHub Pages automatically on every push to `main`. To turn
+this on (one-time setup, a few clicks, not part of the workflow file):
+
+1. Push this repo to GitHub if you haven't already.
+2. In the repo, go to **Settings → Pages**.
+3. Under **Build and deployment → Source**, choose **GitHub Actions**
+   (not "Deploy from a branch" — that's the older method and doesn't use
+   this workflow).
+4. Push any commit to `main` (or go to the **Actions** tab and run the
+   "Deploy to GitHub Pages" workflow manually via **Run workflow**).
+5. The Actions tab will show the deploy running; once it finishes, the
+   **Settings → Pages** page shows your live URL, something like
+   `https://<your-username>.github.io/<repo-name>/`.
+
+From then on, every push to `main` redeploys automatically — no further
+manual steps. The workflow only ever publishes `index.html` itself (plus a
+`.nojekyll` marker file); the `test/` folder and this README stay out of
+the deployed site.
+
+
 
 The `test/` folder has a Playwright-driven end-to-end test that exercises
 the real app over a real (locally-run, not the cloud one) PeerJS signaling
