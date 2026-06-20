@@ -506,16 +506,20 @@
       <h1>Estimate together,<br>peer to peer.</h1>
       <p class="sub">Create a room, share the link, and reveal estimates together once everyone's picked a card. Runs entirely in your browsers &mdash; no server stores your data.</p>
       <p class="sub2">One person needs to keep their tab open as the host. If they close it, the room ends for everyone.</p>
-      <div class="landing-actions">
-        <div>
+      <div class="landing-actions" id="landing-actions">
+        <div id="name-field-top">
           <div class="field-label">Your name</div>
-          <input type="text" id="name-input" placeholder="e.g. William" maxlength="24">
+          <input type="text" id="name-input-top" placeholder="e.g. William" maxlength="24">
         </div>
         <button class="btn btn-primary" id="create-btn">Create a new room</button>
         <div class="divider-row">or join existing</div>
         <div>
           <div class="field-label">Room link or code</div>
           <input type="text" class="mono" id="join-code-input" placeholder="paste room code here" maxlength="80">
+        </div>
+        <div id="name-field-bottom" class="hidden">
+          <div class="field-label">Your name</div>
+          <input type="text" id="name-input-bottom" placeholder="e.g. William" maxlength="24">
         </div>
         <button class="btn btn-ghost" id="join-btn">Join room</button>
         <div class="err-text" id="error-text"></div>
@@ -599,6 +603,32 @@ let currentRoom = { revealed: false, players: {} };
 
 function showError(msg) { el('error-text').textContent = msg; el('status-text').textContent = ''; }
 function showStatus(msg) { el('status-text').textContent = msg; el('error-text').textContent = ''; }
+
+// Two name inputs exist (one above "Create a new room", one above "Join
+// room") so each flow's primary action sits directly under the field it
+// needs. Only one is visible at a time; both are kept in sync so the
+// name typed in either place is preserved regardless of which layout is
+// showing when the user submits.
+function getName() {
+  const visible = el('join-code-input').value.trim() ? el('name-input-bottom') : el('name-input-top');
+  return visible.value.trim();
+}
+
+function syncNameInputs(source) {
+  const value = source.value;
+  el('name-input-top').value = value;
+  el('name-input-bottom').value = value;
+}
+
+function updateLandingMode() {
+  const hasCode = el('join-code-input').value.trim().length > 0;
+  el('name-field-top').classList.toggle('hidden', hasCode);
+  el('name-field-bottom').classList.toggle('hidden', !hasCode);
+  el('create-btn').classList.toggle('btn-primary', !hasCode);
+  el('create-btn').classList.toggle('btn-ghost', hasCode);
+  el('join-btn').classList.toggle('btn-primary', hasCode);
+  el('join-btn').classList.toggle('btn-ghost', !hasCode);
+}
 
 function buildHand() {
   const hand = el('hand');
@@ -760,7 +790,7 @@ function leaveRoom() {
 
 // ---- Host flow ----
 function createRoom() {
-  const name = el('name-input').value.trim();
+  const name = getName();
   if (!name) { showError('Enter your name to create a room.'); return; }
   showError('');
   myName = name;
@@ -854,7 +884,7 @@ function extractRoomCode(input) {
 }
 
 function joinRoom() {
-  const name = el('name-input').value.trim();
+  const name = getName();
   const rawCode = el('join-code-input').value;
   const code = extractRoomCode(rawCode);
   if (!name) { showError('Enter your name to join.'); return; }
@@ -933,11 +963,17 @@ el('copy-btn').addEventListener('click', () => {
   }).catch(() => {});
 });
 
+el('name-input-top').addEventListener('input', (e) => syncNameInputs(e.target));
+el('name-input-bottom').addEventListener('input', (e) => syncNameInputs(e.target));
+el('join-code-input').addEventListener('input', updateLandingMode);
+
 // Auto-fill join code if a room link was opened directly.
 const existingCode = new URL(location.href).searchParams.get('room');
 if (existingCode) {
   el('join-code-input').value = existingCode;
 }
+updateLandingMode();
+
 </script>
 </body>
 </html>
