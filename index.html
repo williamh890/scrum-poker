@@ -593,6 +593,29 @@ const deckLabel = (v) => (DECK.find(d => d.v === v) || { label: v }).label;
 
 const el = (id) => document.getElementById(id);
 
+// ---- Connection config ----
+// Multiple STUN servers from different providers improve NAT traversal
+// odds on restricted networks. The TURN server is a last resort relay
+// when direct WebRTC paths fail entirely (common behind symmetric NAT or
+// strict firewalls on slow/corporate connections).
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+    { urls: 'turns:0.peerjs.com:443', username: 'peerjs', credential: 'peerjsp' },
+  ],
+  iceCandidatePoolSize: 10,
+};
+
+// How long (ms) to wait for hostConn.on('open') before retrying.
+// WebRTC ICE negotiation can stall on slow connections; 12s is generous
+// enough for TURN relay fallback while not leaving users hanging forever.
+const JOIN_TIMEOUT_MS = 12000;
+const JOIN_MAX_RETRIES = 3;
+
 // ---- App state ----
 let myName = '';
 let isHost = false;
@@ -604,14 +627,13 @@ const peerConns = new Map(); // (host only) name -> DataConnection
 // canonical room state, lives on the host, mirrored on joiners
 let currentRoom = { revealed: false, players: {} };
 
+// Joiner retry state
+let joinAttempt = 0;
+let joinTimeoutHandle = null;
+
 function showError(msg) { el('error-text').textContent = msg; el('status-text').textContent = ''; }
 function showStatus(msg) { el('status-text').textContent = msg; el('error-text').textContent = ''; }
 
-// Two name inputs exist (one above "Create a new room", one above "Join
-// room") so each flow's primary action sits directly under the field it
-// needs. Only one is visible at a time; both are kept in sync so the
-// name typed in either place is preserved regardless of which layout is
-// showing when the user submits.
 function getName() {
   const visible = el('join-code-input').value.trim() ? el('name-input-bottom') : el('name-input-top');
   return visible.value.trim();
@@ -778,6 +800,8 @@ function enterRoomUI() {
 }
 
 function leaveRoom() {
+  clearTimeout(joinTimeoutHandle);
+  joinAttempt = 0;
   if (peer) { peer.destroy(); peer = null; }
   hostConn = null;
   peerConns.clear();
@@ -800,14 +824,7 @@ function createRoom() {
   isHost = true;
 
   showStatus('Setting up your room…');
-  peer = new Peer(undefined, {
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
-      ],
-    },
-  });
+  peer = new Peer(undefined, { config: ICE_CONFIG });
 
   peer.on('open', (id) => {
     roomCode = id;
@@ -822,26 +839,15 @@ function createRoom() {
   peer.on('connection', (conn) => {
     let joinedName = null;
     conn.on('open', () => {
-      // We don't know the joiner's name until their first message, but
-      // PeerJS connections carry metadata passed at connect-time instead.
       const requestedName = (conn.metadata && conn.metadata.name) ? conn.metadata.name : 'Guest';
       const existingConn = peerConns.get(requestedName);
 
       if (currentRoom.players[requestedName]) {
-        // A player with this name already exists in the room. We treat
-        // this new connection as that same player reconnecting (e.g.
-        // after a refresh or dropped wifi) rather than minting a new
-        // name — "newest connection for a name wins" is simpler and more
-        // robust than trying to detect whether the old connection is
-        // really dead, since WebRTC's own close detection can lag well
-        // behind reality. Any previous connection object for this name
-        // is force-closed so it can't also claim to represent the player.
         if (existingConn && existingConn !== conn) {
           try { existingConn.close(); } catch (e) { /* already gone */ }
         }
         joinedName = requestedName;
       } else {
-        // Genuinely new name.
         joinedName = requestedName;
         currentRoom.players[joinedName] = { vote: null, isHost: false };
       }
@@ -856,11 +862,11 @@ function createRoom() {
       hostHandleIncoming(joinedName, msg);
     });
     conn.on('close', () => {
-      // Only clear the connection entry if it's still this one (a newer
-      // reconnect may have already replaced it in peerConns).
       if (joinedName && peerConns.get(joinedName) === conn) peerConns.delete(joinedName);
-      // Player stays in the roster (consistent with "refresh shouldn't lose your seat"),
-      // they just stop being reachable until they reconnect.
+    });
+    conn.on('error', (err) => {
+      console.warn('Host-side conn error for', joinedName, err);
+      if (joinedName && peerConns.get(joinedName) === conn) peerConns.delete(joinedName);
     });
   });
 
@@ -870,7 +876,16 @@ function createRoom() {
     showStatus('Connection issue: ' + (err && err.type ? err.type : 'unknown error'));
   });
 
-  peer.on('disconnected', () => setConnState('down'));
+  peer.on('disconnected', () => {
+    setConnState('down');
+    // PeerJS can reconnect to its signalling server without tearing down
+    // existing data channels — attempt that before giving up.
+    if (peer && !peer.destroyed) {
+      setTimeout(() => {
+        if (peer && !peer.destroyed) peer.reconnect();
+      }, 2000);
+    }
+  });
 }
 
 // ---- Joiner flow ----
@@ -886,41 +901,66 @@ function extractRoomCode(input) {
   return trimmed;
 }
 
-function joinRoom() {
-  const name = getName();
-  const rawCode = el('join-code-input').value;
-  const code = extractRoomCode(rawCode);
-  if (!name) { showError('Enter your name to join.'); return; }
-  if (!code) { showError('Enter a room link or code.'); return; }
-  showError('');
-  myName = name;
-  isHost = false;
-  roomCode = code;
+// Tears down the current peer and hostConn cleanly so a fresh attempt
+// can be made without stale event listeners firing across retries.
+function destroyJoinerPeer() {
+  clearTimeout(joinTimeoutHandle);
+  if (hostConn) { try { hostConn.close(); } catch (e) {} hostConn = null; }
+  if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+}
 
-  showStatus('Connecting to room…');
-  peer = new Peer(undefined, {
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
-      ],
-    },
-  });
+// Core join logic — called once per attempt. On timeout or transient
+// error it schedules itself again up to JOIN_MAX_RETRIES times.
+function attemptJoin(name, code, attempt) {
+  if (attempt > JOIN_MAX_RETRIES) {
+    showError(`Couldn't reach the room after ${JOIN_MAX_RETRIES} tries. Check the code and ask the host to confirm their tab is still open.`);
+    el('join-btn').disabled = false;
+    el('create-btn').disabled = false;
+    return;
+  }
+
+  const suffix = attempt > 1 ? ` (attempt ${attempt}/${JOIN_MAX_RETRIES})` : '';
+  showStatus(`Connecting to room…${suffix}`);
+
+  destroyJoinerPeer();
+
+  peer = new Peer(undefined, { config: ICE_CONFIG });
+
+  // If the PeerJS signalling server itself is slow, peer.on('open') may
+  // also lag. We guard the whole attempt with a single outer timeout.
+  joinTimeoutHandle = setTimeout(() => {
+    console.warn(`Join attempt ${attempt} timed out, retrying…`);
+    attemptJoin(name, code, attempt + 1);
+  }, JOIN_TIMEOUT_MS);
 
   peer.on('open', () => {
-    hostConn = peer.connect(roomCode, { metadata: { name: myName }, reliable: true });
+    // Signalling server is up — now open the data channel to the host.
+    hostConn = peer.connect(code, {
+      metadata: { name },
+      reliable: true,
+      serialization: 'json',
+    });
 
     hostConn.on('open', () => {
+      clearTimeout(joinTimeoutHandle);
       setConnState('live');
       enterRoomUI();
       const url = new URL(location.href);
       url.searchParams.set('room', roomCode);
       history.replaceState(null, '', url);
+      el('join-btn').disabled = false;
+      el('create-btn').disabled = false;
     });
 
     hostConn.on('data', (raw) => {
+      // With serialization:'json' PeerJS may hand us the object directly,
+      // but we guard against the raw-string case too.
       let msg;
-      try { msg = JSON.parse(raw); } catch (e) { return; }
+      if (typeof raw === 'string') {
+        try { msg = JSON.parse(raw); } catch (e) { return; }
+      } else {
+        msg = raw;
+      }
       if (msg.type === 'state') {
         currentRoom = msg.room;
         render();
@@ -928,25 +968,64 @@ function joinRoom() {
     });
 
     hostConn.on('close', () => {
-      setConnState('down');
-      showStatus('Lost connection to the host. They may have closed the room.');
+      // Only treat this as a real disconnect if we're already in-room.
+      if (!el('room-view').classList.contains('hidden')) {
+        setConnState('down');
+        showStatus('Lost connection to the host. They may have closed the room.');
+      }
     });
 
     hostConn.on('error', (err) => {
-      console.error('Connection error', err);
-      setConnState('down');
-      showError('Could not reach that room. Check the code and try again.');
+      console.error('hostConn error', err);
+      // If we haven't entered the room yet this is a connection failure —
+      // retry rather than surfacing a raw error.
+      if (!el('room-view').classList.contains('hidden')) {
+        setConnState('down');
+        showError('Connection to host lost: ' + (err && err.type ? err.type : 'unknown'));
+      } else {
+        clearTimeout(joinTimeoutHandle);
+        attemptJoin(name, code, attempt + 1);
+      }
     });
   });
 
   peer.on('error', (err) => {
-    console.error('Peer error', err);
+    console.error('Peer error (attempt ' + attempt + ')', err);
+    clearTimeout(joinTimeoutHandle);
+
     if (err && err.type === 'peer-unavailable') {
+      // Definitive: the room code doesn't exist on the signalling server.
+      // No point retrying.
       showError('No room found with that code. Check it and try again.');
-    } else {
-      showError('Connection issue: ' + (err && err.type ? err.type : 'unknown error'));
+      el('join-btn').disabled = false;
+      el('create-btn').disabled = false;
+      return;
     }
+
+    // Transient errors (network, server-error, socket-error, etc.) — retry.
+    const delay = attempt * 1500;
+    showStatus(`Connection issue (${err && err.type ? err.type : 'unknown'}), retrying in ${delay / 1000}s…`);
+    setTimeout(() => attemptJoin(name, code, attempt + 1), delay);
   });
+}
+
+function joinRoom() {
+  const name = getName();
+  const rawCode = el('join-code-input').value;
+  const code = extractRoomCode(rawCode);
+  if (!name) { showError('Enter your name to join.'); return; }
+  if (!code) { showError('Enter a room link or code.'); return; }
+  showError('');
+
+  myName = name;
+  isHost = false;
+  roomCode = code;
+  joinAttempt = 0;
+
+  el('join-btn').disabled = true;
+  el('create-btn').disabled = true;
+
+  attemptJoin(name, code, 1);
 }
 
 // ---- Wiring ----
