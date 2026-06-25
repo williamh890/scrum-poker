@@ -981,6 +981,25 @@ function createRoom() {
   peer.on('connection', (conn) => {
     let joinedName = null;
     diag(`Incoming join attempt from "${conn.metadata && conn.metadata.name}"`);
+
+    // Same rationale as the joiner side: PeerJS's conn 'error' event won't
+    // fire on a silent ICE failure, so we watch the native
+    // RTCPeerConnection's iceConnectionState directly.
+    let hostIcePollCount = 0;
+    const hostIcePoll = setInterval(() => {
+      hostIcePollCount++;
+      const pc = conn.peerConnection;
+      if (pc) {
+        clearInterval(hostIcePoll);
+        pc.addEventListener('iceconnectionstatechange', () => {
+          const label = joinedName || (conn.metadata && conn.metadata.name) || 'unknown joiner';
+          diag(`${label} ICE state: ${pc.iceConnectionState}`, pc.iceConnectionState === 'failed' ? 'bad' : '');
+        });
+      } else if (hostIcePollCount > 20) {
+        clearInterval(hostIcePoll);
+      }
+    }, 250);
+
     conn.on('open', () => {
       const requestedName = (conn.metadata && conn.metadata.name) ? conn.metadata.name : 'Guest';
       const existingConn = peerConns.get(requestedName);
@@ -1095,6 +1114,33 @@ function attemptJoin(name, code, attempt) {
       reliable: true,
       serialization: 'json',
     });
+
+    // PeerJS's own 'error' event does NOT fire when ICE negotiation
+    // silently fails or stalls (no candidate pair ever succeeds) -- only
+    // for things like the signalling socket itself erroring. That means a
+    // dead-on-arrival ICE negotiation looks IDENTICAL to a slow one until
+    // our own timeout fires, which makes the real cause invisible. We poll
+    // for the underlying RTCPeerConnection (it's created asynchronously by
+    // PeerJS, so it may not exist on this tick yet) and attach a listener
+    // directly to its native iceConnectionState, which DOES report
+    // 'failed' the moment every candidate pair has been exhausted.
+    let icePollCount = 0;
+    const icePoll = setInterval(() => {
+      icePollCount++;
+      const pc = hostConn && hostConn.peerConnection;
+      if (pc) {
+        clearInterval(icePoll);
+        diag(`ICE state: ${pc.iceConnectionState}`);
+        pc.addEventListener('iceconnectionstatechange', () => {
+          diag(`ICE state changed: ${pc.iceConnectionState}`, pc.iceConnectionState === 'failed' ? 'bad' : '');
+          if (pc.iceConnectionState === 'failed') {
+            diag('ICE failed: no candidate pair (direct, STUN, or TURN) succeeded. This almost always means the network is blocking outbound UDP/TCP to all relay servers, not a code bug.', 'bad');
+          }
+        });
+      } else if (icePollCount > 20) {
+        clearInterval(icePoll);
+      }
+    }, 250);
 
     hostConn.on('open', () => {
       clearTimeout(joinTimeoutHandle);
