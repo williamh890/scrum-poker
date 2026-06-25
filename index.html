@@ -672,10 +672,15 @@ const ICE_CONFIG = {
 
     // Open Relay community TURN - independent operator/infra from PeerJS,
     // also offering port 80/443. Different failure domain as redundancy.
-    { urls: 'turn:openrelay.metered.ca:80' },
-    { urls: 'turn:openrelay.metered.ca:80?transport=tcp' },
-    { urls: 'turn:openrelay.metered.ca:443' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp' },
+    // NOTE: every turn:/turns: entry MUST include username + credential or
+    // the browser throws synchronously when constructing RTCPeerConnection
+    // (InvalidAccessError) -- there is no such thing as an anonymous TURN
+    // entry in the iceServers array, even for "public" servers. These are
+    // Open Relay's published shared demo credentials, not secrets.
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ],
   iceCandidatePoolSize: 10,
 };
