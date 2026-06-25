@@ -186,6 +186,32 @@
     min-height: 16px;
   }
 
+  .diag-toggle {
+    font-size: 11px;
+    color: var(--muted-dim);
+    text-align: left;
+    text-decoration: underline;
+    cursor: pointer;
+    margin-top: 2px;
+  }
+
+  .diag-box {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: left;
+    color: var(--muted);
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .diag-box .ok { color: var(--teal); }
+  .diag-box .bad { color: var(--alert); }
+
   /* ===== Room header ===== */
   .room-header {
     display: flex;
@@ -222,6 +248,17 @@
     font-family: 'Fraunces', serif;
     font-size: 28px;
     font-weight: 600;
+  }
+
+  .conn-path-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted-dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 6px;
   }
 
   .room-code-chip {
@@ -527,6 +564,8 @@
         <button class="btn btn-ghost" id="join-btn">Join room</button>
         <div class="err-text" id="error-text"></div>
         <div class="status-text" id="status-text"></div>
+        <div class="diag-toggle" id="diag-toggle">show connection details</div>
+        <div class="diag-box hidden" id="diag-box"></div>
       </div>
     </div>
 
@@ -534,7 +573,7 @@
     <div id="room-view" class="hidden">
       <div class="room-header">
         <div>
-          <div class="room-eyebrow"><span class="conn-dot" id="conn-dot"></span><span id="conn-label">Connecting</span></div>
+          <div class="room-eyebrow"><span class="conn-dot" id="conn-dot"></span><span id="conn-label">Connecting</span><span class="conn-path-tag hidden" id="conn-path-tag"></span></div>
           <div class="room-title">Sprint Estimation</div>
           <div class="you-label" style="margin-top:6px;">Voting as <b id="you-name"></b> &middot; <span class="leave-link" id="leave-link">leave room</span></div>
         </div>
@@ -594,27 +633,59 @@ const deckLabel = (v) => (DECK.find(d => d.v === v) || { label: v }).label;
 const el = (id) => document.getElementById(id);
 
 // ---- Connection config ----
-// Multiple STUN servers from different providers improve NAT traversal
-// odds on restricted networks. The TURN server is a last resort relay
-// when direct WebRTC paths fail entirely (common behind symmetric NAT or
-// strict firewalls on slow/corporate connections).
+// IMPORTANT: this app is used by people on a campus network in Alaska,
+// home/mobile networks in Mexico, and various US ISPs. STUN alone only
+// gets two peers connected if at least one side has an easy ("full cone")
+// NAT. Carrier-grade NAT (common on residential ISPs and some mobile
+// carriers) and strict corporate/campus firewalls require a TURN relay
+// to succeed at all -- there is no fallback once STUN fails.
+//
+// Listing several independent STUN providers, AND a relay that offers
+// BOTH UDP and TCP-over-443, materially improves odds: if a network
+// blocks UDP outright (common on restrictive firewalls), only a TCP/TLS
+// relay on port 443 gets through, because that's indistinguishable from
+// normal HTTPS traffic to a firewall doing simple port filtering.
+//
+// NOTE: the public/no-signup TURN servers below are best-effort, shared,
+// uncredentialed community infrastructure -- they can be slow, rate
+// limited, or intermittently down. They are NOT a substitute for a
+// dedicated free-tier account (e.g. Metered.ca / ExpressTURN, both offer
+// free tiers around 1000GB/mo which this app will never approach), which
+// would remove this class of bug entirely. Listing multiple here is a
+// redundancy/mitigation, not a permanent fix.
 const ICE_CONFIG = {
   iceServers: [
+    // STUN - multiple independent providers so one outage doesn't stall ICE gathering
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.relay.metered.ca:80' },
+
+    // TURN (UDP, default port) - PeerJS's own relay
     { urls: 'turn:0.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+
+    // TURN over TLS on port 443 - this is the one most likely to get a
+    // restrictive campus/corporate/mobile-carrier network through, since
+    // port 443 traffic looks like ordinary HTTPS to a firewall.
     { urls: 'turns:0.peerjs.com:443', username: 'peerjs', credential: 'peerjsp' },
+
+    // Open Relay community TURN - independent operator/infra from PeerJS,
+    // also offering port 80/443. Different failure domain as redundancy.
+    { urls: 'turn:openrelay.metered.ca:80' },
+    { urls: 'turn:openrelay.metered.ca:80?transport=tcp' },
+    { urls: 'turn:openrelay.metered.ca:443' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp' },
   ],
   iceCandidatePoolSize: 10,
 };
 
 // How long (ms) to wait for hostConn.on('open') before retrying.
-// WebRTC ICE negotiation can stall on slow connections; 12s is generous
-// enough for TURN relay fallback while not leaving users hanging forever.
-const JOIN_TIMEOUT_MS = 12000;
-const JOIN_MAX_RETRIES = 3;
+// WebRTC ICE negotiation can stall on slow connections; 15s is generous
+// enough for TURN relay fallback (now trying more servers) while not
+// leaving users hanging forever.
+const JOIN_TIMEOUT_MS = 15000;
+const JOIN_MAX_RETRIES = 4;
 
 // ---- App state ----
 let myName = '';
@@ -631,8 +702,72 @@ let currentRoom = { revealed: false, players: {} };
 let joinAttempt = 0;
 let joinTimeoutHandle = null;
 
-function showError(msg) { el('error-text').textContent = msg; el('status-text').textContent = ''; }
-function showStatus(msg) { el('status-text').textContent = msg; el('error-text').textContent = ''; }
+// ---- Diagnostics ----
+// Tracks what's actually happening during ICE negotiation so that when
+// someone fails to connect, we (or they, screenshotting the panel) can
+// tell whether it's a STUN-only-no-relay situation, a TURN failure, a
+// total signalling failure, etc. instead of a generic "didn't work."
+const diagLog = [];
+function diag(line, cls) {
+  const ts = new Date().toLocaleTimeString();
+  diagLog.push({ ts, line, cls: cls || '' });
+  if (diagLog.length > 60) diagLog.shift();
+  renderDiag();
+}
+function renderDiag() {
+  const box = el('diag-box');
+  if (box.classList.contains('hidden')) return;
+  box.innerHTML = diagLog.map(d =>
+    `<span class="${d.cls}">[${d.ts}] ${escapeHtml(d.line)}</span>`
+  ).join('\n');
+  box.scrollTop = box.scrollHeight;
+}
+el('diag-toggle').addEventListener('click', () => {
+  const box = el('diag-box');
+  box.classList.toggle('hidden');
+  el('diag-toggle').textContent = box.classList.contains('hidden') ? 'show connection details' : 'hide connection details';
+  renderDiag();
+});
+
+// Inspects a peer connection's ICE candidate pairs once connected to
+// determine whether the active path is direct/STUN ("srflx"/"host") or
+// had to fall back to a TURN relay ("relay"). Surfaced in the UI so it's
+// obvious which networks are relay-dependent.
+function reportActiveCandidatePath(peerjsConn, label) {
+  try {
+    const pc = peerjsConn.peerConnection;
+    if (!pc || !pc.getStats) return;
+    pc.getStats(null).then((stats) => {
+      let activePairId = null;
+      stats.forEach((report) => {
+        if (report.type === 'transport' && report.selectedCandidatePairId) {
+          activePairId = report.selectedCandidatePairId;
+        }
+        if (report.type === 'candidate-pair' && report.selected && !activePairId) {
+          activePairId = report.id;
+        }
+      });
+      if (!activePairId) return;
+      const pair = stats.get(activePairId);
+      if (!pair) return;
+      const local = stats.get(pair.localCandidateId);
+      if (!local) return;
+      const type = local.candidateType; // 'host' | 'srflx' | 'relay' | 'prflx'
+      const proto = local.protocol || '';
+      let pretty = type;
+      if (type === 'relay') pretty = `relay (TURN, ${proto.toUpperCase()})`;
+      else if (type === 'srflx') pretty = 'direct (STUN)';
+      else if (type === 'host') pretty = 'direct (local)';
+      diag(`${label}: connected via ${pretty}`, type === 'relay' ? '' : 'ok');
+      const tag = el('conn-path-tag');
+      tag.textContent = pretty;
+      tag.classList.remove('hidden');
+    }).catch(() => {});
+  } catch (e) { /* getStats not available in this browser path, non-fatal */ }
+}
+
+function showError(msg) { el('error-text').textContent = msg; el('status-text').textContent = ''; if (msg) diag(msg, 'bad'); }
+function showStatus(msg) { el('status-text').textContent = msg; el('error-text').textContent = ''; if (msg) diag(msg); }
 
 function getName() {
   const visible = el('join-code-input').value.trim() ? el('name-input-bottom') : el('name-input-top');
@@ -824,12 +959,14 @@ function createRoom() {
   isHost = true;
 
   showStatus('Setting up your room…');
+  diag('Creating room, opening signalling connection…');
   peer = new Peer(undefined, { config: ICE_CONFIG });
 
   peer.on('open', (id) => {
     roomCode = id;
     currentRoom = { revealed: false, players: { [myName]: { vote: null, isHost: true } } };
     setConnState('live');
+    diag(`Room created: ${id}`, 'ok');
     enterRoomUI();
     const url = new URL(location.href);
     url.searchParams.set('room', roomCode);
@@ -838,6 +975,7 @@ function createRoom() {
 
   peer.on('connection', (conn) => {
     let joinedName = null;
+    diag(`Incoming join attempt from "${conn.metadata && conn.metadata.name}"`);
     conn.on('open', () => {
       const requestedName = (conn.metadata && conn.metadata.name) ? conn.metadata.name : 'Guest';
       const existingConn = peerConns.get(requestedName);
@@ -853,6 +991,8 @@ function createRoom() {
       }
 
       peerConns.set(joinedName, conn);
+      diag(`${joinedName} connected`, 'ok');
+      reportActiveCandidatePath(conn, joinedName);
       hostBroadcast();
     });
     conn.on('data', (raw) => {
@@ -862,10 +1002,14 @@ function createRoom() {
       hostHandleIncoming(joinedName, msg);
     });
     conn.on('close', () => {
-      if (joinedName && peerConns.get(joinedName) === conn) peerConns.delete(joinedName);
+      if (joinedName && peerConns.get(joinedName) === conn) {
+        peerConns.delete(joinedName);
+        diag(`${joinedName} disconnected`, 'bad');
+      }
     });
     conn.on('error', (err) => {
       console.warn('Host-side conn error for', joinedName, err);
+      diag(`Connection error for ${joinedName || 'unknown joiner'}: ${err && err.type ? err.type : err}`, 'bad');
       if (joinedName && peerConns.get(joinedName) === conn) peerConns.delete(joinedName);
     });
   });
@@ -873,11 +1017,13 @@ function createRoom() {
   peer.on('error', (err) => {
     console.error('Peer error', err);
     setConnState('down');
+    diag(`Peer error: ${err && err.type ? err.type : 'unknown'}`, 'bad');
     showStatus('Connection issue: ' + (err && err.type ? err.type : 'unknown error'));
   });
 
   peer.on('disconnected', () => {
     setConnState('down');
+    diag('Disconnected from signalling server, attempting reconnect…', 'bad');
     // PeerJS can reconnect to its signalling server without tearing down
     // existing data channels — attempt that before giving up.
     if (peer && !peer.destroyed) {
@@ -913,7 +1059,8 @@ function destroyJoinerPeer() {
 // error it schedules itself again up to JOIN_MAX_RETRIES times.
 function attemptJoin(name, code, attempt) {
   if (attempt > JOIN_MAX_RETRIES) {
-    showError(`Couldn't reach the room after ${JOIN_MAX_RETRIES} tries. Check the code and ask the host to confirm their tab is still open.`);
+    showError(`Couldn't reach the room after ${JOIN_MAX_RETRIES} tries. This usually means your network is blocking the relay connection (common on restrictive wifi/VPNs). Try a different network (e.g. mobile hotspot), or check the connection details below.`);
+    diag('Giving up after max retries.', 'bad');
     el('join-btn').disabled = false;
     el('create-btn').disabled = false;
     return;
@@ -921,6 +1068,7 @@ function attemptJoin(name, code, attempt) {
 
   const suffix = attempt > 1 ? ` (attempt ${attempt}/${JOIN_MAX_RETRIES})` : '';
   showStatus(`Connecting to room…${suffix}`);
+  diag(`Join attempt ${attempt}: opening signalling connection…`);
 
   destroyJoinerPeer();
 
@@ -930,10 +1078,12 @@ function attemptJoin(name, code, attempt) {
   // also lag. We guard the whole attempt with a single outer timeout.
   joinTimeoutHandle = setTimeout(() => {
     console.warn(`Join attempt ${attempt} timed out, retrying…`);
+    diag(`Attempt ${attempt} timed out (no response in ${JOIN_TIMEOUT_MS / 1000}s), retrying…`, 'bad');
     attemptJoin(name, code, attempt + 1);
   }, JOIN_TIMEOUT_MS);
 
   peer.on('open', () => {
+    diag('Signalling connected, opening data channel to host…');
     // Signalling server is up — now open the data channel to the host.
     hostConn = peer.connect(code, {
       metadata: { name },
@@ -944,6 +1094,8 @@ function attemptJoin(name, code, attempt) {
     hostConn.on('open', () => {
       clearTimeout(joinTimeoutHandle);
       setConnState('live');
+      diag('Connected to host', 'ok');
+      reportActiveCandidatePath(hostConn, myName);
       enterRoomUI();
       const url = new URL(location.href);
       url.searchParams.set('room', roomCode);
@@ -971,12 +1123,14 @@ function attemptJoin(name, code, attempt) {
       // Only treat this as a real disconnect if we're already in-room.
       if (!el('room-view').classList.contains('hidden')) {
         setConnState('down');
+        diag('Connection to host closed.', 'bad');
         showStatus('Lost connection to the host. They may have closed the room.');
       }
     });
 
     hostConn.on('error', (err) => {
       console.error('hostConn error', err);
+      diag(`Data channel error: ${err && err.type ? err.type : err}`, 'bad');
       // If we haven't entered the room yet this is a connection failure —
       // retry rather than surfacing a raw error.
       if (!el('room-view').classList.contains('hidden')) {
@@ -992,6 +1146,7 @@ function attemptJoin(name, code, attempt) {
   peer.on('error', (err) => {
     console.error('Peer error (attempt ' + attempt + ')', err);
     clearTimeout(joinTimeoutHandle);
+    diag(`Peer error on attempt ${attempt}: ${err && err.type ? err.type : err}`, 'bad');
 
     if (err && err.type === 'peer-unavailable') {
       // Definitive: the room code doesn't exist on the signalling server.
